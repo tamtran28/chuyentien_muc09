@@ -1,151 +1,82 @@
-import io
-import os
 import pandas as pd
 import streamlit as st
+import io
 
-# ================== CONFIG ==================
-st.set_page_config(page_title="Mục 09 - Tổng hợp chuyển tiền", layout="wide")
-st.title("📦 Mục 09 — Tổng hợp theo PART_NAME & Mục đích chuyển tiền (3 năm gần nhất)")
-st.caption("Đọc được cả .xls và .xlsx (không cần xlrd).")
+st.set_page_config(page_title="Tổng hợp Mục 09", layout="wide")
+st.title("📊 Tổng hợp chuyển tiền Mục 09")
 
-st.markdown(
-    """
-**Yêu cầu cột dữ liệu** (có thể đổi tên ở phần ⚙️):
-- `TRAN_DATE` (ngày giao dịch)
-- `TRAN_ID` (mã giao dịch)
-- `PART_NAME` (bên liên quan)
-- `PURPOSE_OF_REMITTANCE` (mục đích chuyển tiền)
-- `QUY_DOI_USD` (số tiền USD)
-"""
-)
-
-# ================== INPUTS ==================
-file = st.file_uploader("Chọn file Excel", type=["xls", "xlsx"])
-
-with st.expander("⚙️ Tuỳ chỉnh cột (nếu khác tên mặc định)"):
-    col_date = st.text_input("Cột ngày giao dịch", "TRAN_DATE")
-    col_tranid = st.text_input("Cột mã giao dịch", "TRAN_ID")
-    col_party = st.text_input("Cột PART_NAME", "PART_NAME")
-    col_purpose = st.text_input("Cột PURPOSE_OF_REMITTANCE", "PURPOSE_OF_REMITTANCE")
-    col_amount = st.text_input("Cột số tiền (USD)", "QUY_DOI_USD")
-
-run = st.button("▶️ Chạy tổng hợp")
-
-# ================== HELPERS ==================
+# Hàm đọc Excel không dùng calamine
 def read_excel_any(uploaded_file):
-    """
-    Đọc .xls bằng calamine, .xlsx bằng openpyxl; nếu lỗi sẽ tự fallback qua engine còn lại.
-    """
-    name = getattr(uploaded_file, "name", str(uploaded_file))
-    ext = os.path.splitext(name)[1].lower()
-
-    if ext == ".xls":
-        # Ưu tiên calamine cho .xls
-        try:
-            return pd.read_excel(uploaded_file, engine="calamine")
-        except Exception as e:
-            st.warning(f"Đọc .xls bằng calamine lỗi: {e}. Thử engine mặc định.")
-            return pd.read_excel(uploaded_file)  # có thể vẫn là calamine nếu pandas cấu hình mặc định
+    filename = uploaded_file.name.lower()
+    if filename.endswith(".xlsx"):
+        return pd.read_excel(uploaded_file, engine="openpyxl")
     else:
-        # Ưu tiên openpyxl cho .xlsx
-        try:
-            return pd.read_excel(uploaded_file, engine="openpyxl")
-        except Exception as e:
-            st.warning(f"Đọc .xlsx bằng openpyxl lỗi: {e}. Thử engine calamine.")
-            return pd.read_excel(uploaded_file, engine="calamine")
+        st.error("❌ File .xls không được hỗ trợ. Vui lòng lưu lại thành .xlsx rồi tải lên.")
+        return None
 
-def build_output(df: pd.DataFrame, col_date, col_tranid, col_party, col_purpose, col_amount):
-    # Chuẩn hoá ngày & năm
-    df = df.copy()
-    df[col_date] = pd.to_datetime(df[col_date], errors="coerce")
-    df["YEAR"] = df[col_date].dt.year
+uploaded_file = st.file_uploader("Tải file MUC 09 (.xlsx)", type=["xlsx"])
 
-    # Lấy 3 năm gần nhất theo dữ liệu có thật
-    years = sorted([int(y) for y in df["YEAR"].dropna().unique()])
-    if not years:
-        return pd.DataFrame(), []
-    nam_T = years[-1]
-    cac_nam = [y for y in years if y >= nam_T - 2][-3:]  # bảo vệ khi không đủ 3 năm
+if uploaded_file:
+    df = read_excel_any(uploaded_file)
+    if df is not None:
+        # Xử lý dữ liệu
+        df['TRAN_DATE'] = pd.to_datetime(df['TRAN_DATE'], errors='coerce')
+        df['YEAR'] = df['TRAN_DATE'].dt.year
 
-    # Loại trùng theo đúng logic
-    df = df.drop_duplicates(subset=[col_party, col_purpose, col_date, col_tranid])
+        nam_max = df['YEAR'].max()
+        nam_T = nam_max
+        nam_T1 = nam_T - 1
+        nam_T2 = nam_T - 2
 
-    ket_qua = pd.DataFrame()
-    ds_muc_dich = df[col_purpose].dropna().unique()
+        # Loại bỏ PART_NAME trùng
+        df = df.drop_duplicates(subset=['PART_NAME', 'PURPOSE_OF_REMITTANCE', 'TRAN_DATE', 'TRAN_ID'])
 
-    for muc_dich in ds_muc_dich:
-        df_md = df[df[col_purpose] == muc_dich]
-        for nam in cac_nam:
-            df_y = df_md[df_md["YEAR"] == nam]
-            if df_y.empty:
-                continue
+        ket_qua = pd.DataFrame()
+        cac_nam = [nam_T2, nam_T1, nam_T]
+        ds_muc_dich = df['PURPOSE_OF_REMITTANCE'].dropna().unique()
 
-            pivot = (
-                df_y.groupby(col_party)
-                .agg(
-                    tong_lan_nhan=(col_tranid, "count"),
-                    tong_tien_usd=(col_amount, "sum"),
-                )
-                .reset_index()
-            )
+        for muc_dich in ds_muc_dich:
+            df_muc_dich = df[df['PURPOSE_OF_REMITTANCE'] == muc_dich]
 
-            # Đặt tên cột theo yêu cầu
-            col_lan = f"{muc_dich}_LAN_{nam}"
-            col_tien = f"{muc_dich}_TIEN_{nam}"
-            pivot.rename(
-                columns={"tong_lan_nhan": col_lan, "tong_tien_usd": col_tien}, inplace=True
-            )
+            for nam in cac_nam:
+                df_nam = df_muc_dich[df_muc_dich['YEAR'] == nam]
+                if df_nam.empty:
+                    continue
 
-            ket_qua = pivot if ket_qua.empty else pd.merge(ket_qua, pivot, on=col_party, how="outer")
+                pivot = df_nam.groupby('PART_NAME').agg(
+                    tong_lan_nhan=('TRAN_ID', 'count'),
+                    tong_tien_usd=('QUY_DOI_USD', 'sum')
+                ).reset_index()
 
-    # Fill & ép kiểu
-    for c in ket_qua.columns:
-        if "_LAN_" in c:
-            ket_qua[c] = ket_qua[c].fillna(0).astype(int)
-        elif "_TIEN_" in c:
-            ket_qua[c] = ket_qua[c].fillna(0.0).astype(float)
+                col_lan = f"{muc_dich}_LAN_{nam}"
+                col_tien = f"{muc_dich}_TIEN_{nam}"
+                pivot.rename(columns={
+                    'tong_lan_nhan': col_lan,
+                    'tong_tien_usd': col_tien
+                }, inplace=True)
 
-    # Đưa cột party lên đầu
-    if col_party in ket_qua.columns:
-        ket_qua = ket_qua[[col_party] + [c for c in ket_qua.columns if c != col_party]]
+                if ket_qua.empty:
+                    ket_qua = pivot
+                else:
+                    ket_qua = pd.merge(ket_qua, pivot, on='PART_NAME', how='outer')
 
-    return ket_qua, cac_nam
+        for col in ket_qua.columns:
+            if "_LAN_" in col:
+                ket_qua[col] = ket_qua[col].fillna(0).astype(int)
+            elif "_TIEN_" in col:
+                ket_qua[col] = ket_qua[col].fillna(0.0).astype(float)
 
-# ================== RUN ==================
-if run:
-    if not file:
-        st.error("Vui lòng chọn file Excel trước khi chạy.")
-        st.stop()
+        # Hiển thị kết quả
+        st.dataframe(ket_qua)
 
-    try:
-        df = read_excel_any(file)
+        # Xuất file Excel
+        output = io.BytesIO()
+        ket_qua.to_excel(output, index=False)
+        output.seek(0)
 
-        # Kiểm tra cột
-        required = [col_date, col_tranid, col_party, col_purpose, col_amount]
-        missing = [c for c in required if c not in df.columns]
-        if missing:
-            st.error(f"Thiếu cột bắt buộc: {missing}")
-            st.stop()
-
-        ket_qua, cac_nam = build_output(df, col_date, col_tranid, col_party, col_purpose, col_amount)
-
-        if ket_qua.empty:
-            st.info("Không có dữ liệu phù hợp để tổng hợp.")
-        else:
-            st.success(f"Tổng hợp xong cho các năm: {', '.join(map(str, cac_nam))}")
-            st.dataframe(ket_qua, use_container_width=True)
-
-            # Xuất Excel
-            bio = io.BytesIO()
-            with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-                ket_qua.to_excel(writer, sheet_name="tong_hop", index=False)
-            st.download_button(
-                "⬇️ Tải Excel tổng hợp",
-                data=bio.getvalue(),
-                file_name="tong_hop_chuyen_tien.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-
-    except Exception as e:
-        st.error("Đã xảy ra lỗi khi xử lý:")
-        st.exception(e)
+        st.download_button(
+            label="📥 Tải file kết quả",
+            data=output,
+            file_name="tong_hop_chuyen_tien_Muc09.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
