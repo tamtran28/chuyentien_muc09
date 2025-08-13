@@ -1,5 +1,6 @@
 
 import io
+import os
 import pandas as pd
 import streamlit as st
 
@@ -7,7 +8,7 @@ st.set_page_config(page_title="Mục 09 - Tổng hợp chuyển tiền theo mụ
 st.title("📦 Mục 09 — Tổng hợp theo PART_NAME & Mục đích chuyển tiền (3 năm gần nhất)")
 
 st.markdown('''
-Tải lên file Excel **MUC 09.xlsx** (hoặc tương tự) với các cột:
+Tải lên file Excel **MUC 09** với các cột:
 - `TRAN_DATE` (ngày giao dịch)
 - `TRAN_ID` (mã giao dịch)
 - `PART_NAME` (đối tượng nhận/gửi)
@@ -26,6 +27,24 @@ with st.expander("⚙️ Tuỳ chỉnh cột (nếu tên cột khác)"):
 
 run = st.button("▶️ Chạy tổng hợp")
 
+def read_excel_any(file):
+    \"\"\"Đọc .xls bằng calamine, .xlsx bằng openpyxl; tự fallback an toàn.\"\"\"
+    # streamlit UploadedFile có thuộc tính name, readable như file-like
+    name = getattr(file, "name", str(file))
+    ext = os.path.splitext(name)[1].lower()
+    if ext == ".xls":
+        try:
+            return pd.read_excel(file, engine="calamine")
+        except Exception as e:
+            st.warning(f"Đọc .xls bằng calamine lỗi: {e}. Thử lại với engine mặc định.")
+            return pd.read_excel(file)  # có thể vẫn là calamine nếu cài đặt mặc định
+    else:
+        try:
+            return pd.read_excel(file, engine="openpyxl")
+        except Exception as e:
+            st.warning(f"Đọc .xlsx bằng openpyxl lỗi: {e}. Thử engine calamine.")
+            return pd.read_excel(file, engine="calamine")
+
 def build_output(df: pd.DataFrame, col_date, col_tranid, col_party, col_purpose, col_amount):
     # Chuẩn hoá ngày và năm
     df = df.copy()
@@ -33,11 +52,11 @@ def build_output(df: pd.DataFrame, col_date, col_tranid, col_party, col_purpose,
     df["YEAR"] = df[col_date].dt.year
 
     # Xác định 3 năm gần nhất theo dữ liệu thật có
-    years_sorted = sorted(df["YEAR"].dropna().unique())
-    if not years_sorted:
+    years = sorted([int(y) for y in df["YEAR"].dropna().unique()])
+    if not years:
         return pd.DataFrame(), []
-    nam_T = years_sorted[-1]
-    cac_nam = [y for y in years_sorted if y >= nam_T - 2][-3:]  # bảo vệ nếu dữ liệu không đủ 3 năm
+    nam_T = years[-1]
+    cac_nam = [y for y in years if y >= nam_T - 2][-3:]  # <= 3 năm gần nhất
 
     # Loại trùng
     df = df.drop_duplicates(subset=[col_party, col_purpose, col_date, col_tranid])
@@ -46,31 +65,30 @@ def build_output(df: pd.DataFrame, col_date, col_tranid, col_party, col_purpose,
     ds_muc_dich = df[col_purpose].dropna().unique()
 
     for muc_dich in ds_muc_dich:
-        df_muc_dich = df[df[col_purpose] == muc_dich]
+        df_md = df[df[col_purpose] == muc_dich]
         for nam in cac_nam:
-            df_nam = df_muc_dich[df_muc_dich["YEAR"] == nam]
-            if df_nam.empty:
+            df_year = df_md[df_md["YEAR"] == nam]
+            if df_year.empty:
                 continue
-            pivot = df_nam.groupby(col_party).agg(
+            pivot = df_year.groupby(col_party).agg(
                 tong_lan_nhan=(col_tranid, "count"),
                 tong_tien_usd=(col_amount, "sum")
             ).reset_index()
+
             col_lan = f"{muc_dich}_LAN_{nam}"
             col_tien = f"{muc_dich}_TIEN_{nam}"
-            pivot.rename(columns={
-                "tong_lan_nhan": col_lan,
-                "tong_tien_usd": col_tien
-            }, inplace=True)
+            pivot.rename(columns={"tong_lan_nhan": col_lan, "tong_tien_usd": col_tien}, inplace=True)
+
             ket_qua = pivot if ket_qua.empty else pd.merge(ket_qua, pivot, on=col_party, how="outer")
 
-    # Fillna & kiểu dữ liệu
+    # Điền NaN & ép kiểu
     for c in ket_qua.columns:
         if "_LAN_" in c:
             ket_qua[c] = ket_qua[c].fillna(0).astype(int)
         elif "_TIEN_" in c:
             ket_qua[c] = ket_qua[c].fillna(0.0).astype(float)
 
-    # Sắp xếp cột: PART_NAME trước, sau đó theo từng mục đích/năm
+    # Đưa PART_NAME (hoặc cột party) lên đầu
     if col_party in ket_qua.columns:
         cols = [col_party] + [c for c in ket_qua.columns if c != col_party]
         ket_qua = ket_qua[cols]
@@ -78,18 +96,14 @@ def build_output(df: pd.DataFrame, col_date, col_tranid, col_party, col_purpose,
     return ket_qua, cac_nam
 
 if run:
-    if file is None:
+    if not file:
         st.warning("Hãy chọn file Excel trước khi chạy.")
         st.stop()
 
     try:
-        # Ưu tiên engine calamine để đọc cả .xls/.xlsx nếu có
-        try:
-            df = pd.read_excel(file, engine="calamine")
-        except Exception:
-            df = pd.read_excel(file)  # fallback
+        df = read_excel_any(file)
 
-        # Kiểm tra cột
+        # Kiểm tra cột yêu cầu
         missing = [c for c in [col_date, col_tranid, col_party, col_purpose, col_amount] if c not in df.columns]
         if missing:
             st.error(f"Thiếu cột bắt buộc: {missing}")
@@ -98,12 +112,11 @@ if run:
         ket_qua, cac_nam = build_output(df, col_date, col_tranid, col_party, col_purpose, col_amount)
 
         if ket_qua.empty:
-            st.info("Không có dữ liệu phù hợp để tổng hợp (có thể thiếu 3 năm hoặc dữ liệu rỗng).")
+            st.info("Không có dữ liệu phù hợp để tổng hợp.")
         else:
             st.success(f"Tổng hợp xong cho các năm: {', '.join(map(str, cac_nam))}")
-            st.dataframe(ket_qua.head(200))
+            st.dataframe(ket_qua.head(200), use_container_width=True)
 
-            # Xuất Excel
             bio = io.BytesIO()
             with pd.ExcelWriter(bio, engine="openpyxl") as writer:
                 ket_qua.to_excel(writer, sheet_name="tong_hop", index=False)
@@ -111,7 +124,8 @@ if run:
                 "⬇️ Tải Excel tổng hợp",
                 data=bio.getvalue(),
                 file_name="tong_hop_chuyen_tien.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
     except Exception as e:
+        st.error("Đã xảy ra lỗi khi xử lý.")
         st.exception(e)
